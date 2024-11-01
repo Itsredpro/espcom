@@ -131,6 +131,7 @@ typedef struct {
 
 } join_request_struct;
 
+
 typedef struct {
   //protocol identifier
   byte protocol_id[6] = {2,50,22,184,69,249};
@@ -173,6 +174,13 @@ void espcom_set_mode(bool Host);
 bool espcom_init_wifi();
 bool espcom_init_espnow();
 
+bool espcom_init();
+
 //automatic game functions
 void espcom_auto_findgame(void (*cb)(game_struct));
 void espcom_auto_joingame(game_struct);
+
+//outbound comms
+void espcom_sendGameJoinFrame(game_struct game);
+void espcom_sendPairingBeacon(game_status_types gametype = JOINABLE);
+void espcom_sendGameJoinAcceptFrame(uint8_t client_id[6], response_types res = JOINED);
