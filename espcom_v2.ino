@@ -18,20 +18,27 @@ Leaphy communicatie module die gebruik maakt van een Wifi accesspoint voor commu
 #include "espcom_v2.h"
 
 
-#define DEBUG true
 
+
+#define DEBUG true
 #define SCANNER_CHANNEL_WAITTIME 2000 // 2000ms = 2 sec (26 sec total scan time for all 13 channels)
 #define SCANNER_MAX_CHANNEL 13
+#define WIFI_CLIENT_TIMEOUT_TIME 250 //250 ms timeout
+
+
+
 
 //GLOBAL VARIABLES
-void (*dataFunc)(communication_struct) = NULL;
 bool isaHost = false;
+WiFiServer server(80);
 
 
-//other callbacks
-void (*endFunc)(exit_types) = NULL;
-void (*joinFunc)() = NULL;
-void (*unprocessable_frame)() = NULL;
+
+//callbacks
+void (*dataFunc)(communication_struct) = NULL; //incoming data
+void (*endFunc)(exit_types) = NULL; // game exit types
+void (*joinFunc)() = NULL; // game joined event
+void (*unprocessable_frame)() = NULL; // error callback
 
 
 //INTERNAL FUNCTIONS
@@ -144,7 +151,10 @@ bool espcom_init_wifi(){
 
   if (isaHost){
     WiFi.softAP(F("ESP_GAME_HOST"), F("tikkertje"));
+
+    server.begin();
   }
+  
 
   return true;
 }
@@ -162,7 +172,9 @@ bool espcom_init_espnow(){
 }
 
 bool espcom_init(){
-  return espcom_init_wifi() == true && espcom_init_espnow() == true;
+  bool wifi_init = espcom_init_wifi();
+  bool espcom_init = espcom_init_espnow();
+  return wifi_init == true && espcom_init == true;
 }
 
 
@@ -215,7 +227,7 @@ void espcom_auto_findgame(void (*cb)(game_struct)){ // scanner
     #endif
     return;
   }
-  //WiFi.softAPdisconnect(true); // disconnect wifi ap for scanning
+  //WiFi.softAPdisconnect(true); // disconnect wifi ap for scanning // this function may cause unexpected behavior
 
   scanner_currentchannel = 1;
   scanner_cb = cb;
@@ -225,10 +237,60 @@ void espcom_auto_findgame(void (*cb)(game_struct)){ // scanner
 
 void espcom_auto_joingame(game_struct);  //TODO: make this function
 
+//<===============> wifi communication processing <============>
+
+void process_wifi_clients(){
+  WiFiClient client = server.available();
+  //client.available();
+
+  if (!client){
+    return;
+  }
+
+  #if DEBUG
+    log_d(F("Espcom - Processing wifi client."));
+  #endif
+
+  long latest_time = millis(); // keep track of time so we don't hang the entire process
+  String c_line = ""; //current line
+  String c_http = ""; //current http request
+
+  while (client.connected() && millis() - latest_time <= WIFI_CLIENT_TIMEOUT_TIME){
+    if (!client.available()){
+      continue; // skip to next iteration because client has nothing to say
+    }
+    char current_char = client.read(); 
+
+    if (current_char == "\r"){ // skip return carriages because they suck
+      continue;
+    }
+    
+    c_line += current_char;
+    c_http += current_char;
+
+    //TODO: handle client http request
+    //TODO: transmit data to self or other game clients
+
+  }
+
+  // close the conenction after this
+  client.stop();
+  String c_line = "";
+  String c_http = ""; 
+  return;
+}
+
+
+
+
+
+
 
 //<===============> procces sync tasks <=================>
 
-void espcom_tick(){ // non-blocking processor       TODO: stop scanner if beacon frame is received
+void espcom_tick(){ //       TODO: stop scanner if beacon frame is received
+
+  process_wifi_clients();
 
   if (scanner_enabled && millis() - scanner_millis >= SCANNER_CHANNEL_WAITTIME){
     
@@ -236,11 +298,20 @@ void espcom_tick(){ // non-blocking processor       TODO: stop scanner if beacon
     WiFi.begin();
     WiFi.setChannel(scanner_currentchannel);
 
+    #if DEBUG
+      log_d(F("Espcom - scanning next wifi channel..."));
+    #endif
+
+    //TODO: wait for wifi?
+    
     // Reinitialize espnow on the new channel
     esp_now_deinit();  // Deinitialize espnow
 
     if (esp_now_init() != ESP_OK) {
       //TODO: CRITICAL ERROR
+      #if DEBUG
+      log_e(F("Espcom - Could not re-initialize espnow while scanning."));
+    #endif
     }
 
     if (scanner_currentchannel < SCANNER_MAX_CHANNEL){
@@ -258,22 +329,64 @@ void espcom_tick(){ // non-blocking processor       TODO: stop scanner if beacon
 // <===============> ESPNOW FUNCTIONS <=================>
 
 void onDataRecv(const uint8_t *mac, const uint8_t *incomingData, int len) { //receive data
-  default_struct struct_1;
-  memcpy(&struct_1, incomingData, sizeof(struct_1));
+  default_struct struct_def;
+  memcpy(&struct_def, incomingData, sizeof(struct_def));
 
 
-  if (!compareArrays_byte(struct_1.protocol_id, protocol_id)){ // Ignore messages that aren't using our protocol..
+  if (!compareArrays_byte(struct_def.protocol_id, protocol_id)){ // Ignore messages that aren't using our protocol..
     #if DEBUG
-      log_d(F("Espcom - received unprocessable espnow message."));
+      log_d(F("Espcom - received unprocessable espnow message - unmatched protocol id."));
     #endif
     return;
   }
 
-  if (struct_1.frame_type == (NULL || 0)){
+  if (struct_def.frame_type == (NULL || 0)){
     #if DEBUG
       log_d(F("Espcom - received malformed frame."));
     #endif
     return;
   }
   //TODO: process frames
+  /*
+  frame types:
+
+  Game frames
+  1 = game data frame
+
+  Game management frames
+  2 = esp pairing frame
+  3 = game join request frame
+  4 = game join response frame
+  5 = game exit frame
+  */
+
+  switch(struct_def.frame_type){
+    case 1: //game data frame
+      communication_struct struct_game;
+      memcpy(&struct_game, incomingData, sizeof(struct_game));
+      dataFunc(struct_game);
+      break;
+    case 2:
+
+      break;
+    case 3:
+
+      break;
+    case 4:
+
+      break;
+    case 5:
+
+      break;
+    default:
+      #if DEBUG
+        log_d(F("Espcom - received unprocessable espnow message - invalid frame type."));
+      #endif
+
+      break;
+  }
+
 }
+
+
+//TODO: link wifi and espnow communication
